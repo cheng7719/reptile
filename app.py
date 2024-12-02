@@ -7,75 +7,67 @@ import requests
 
 DATABASE = "contacts.db"
 
-name_pattern = re.compile(r'<a[^>]*class="member_name"[^>]*>(.*?)</a>')
-phone_pattern = re.compile(r'\+?\(?\d{1,4}\)?[\s\-]?\d{1,4}[\s\-]?\d{1,4}[\s\-]?\d{1,4}')
-email_pattern = re.compile(r'\b[\w.%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b')
+email_pattern = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+name_pattern = re.compile(r"(?<![\w@.])[\u4e00-\u9fa5]{3,}(?![\w@.])")
+phone_extension_pattern = re.compile(r"電話：\d{2,4}-\d{6,8} 分機 (\d{3,5})")
 
 headers = {
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7,ja;q=0.6,zh-CN;q=0.5,la;q=0.4',
-    'Cache-Control': 'max-age=0',
-    'Connection': 'keep-alive',
-    'Cookie': '_ga_SNR7NPLEYG=GS1.1.1651249603.1.0.1651250646.0; _ga_BGEHGPV3SB=GS1.1.1707539001.1.1.1707539323.0.0.0; _gid=GA1.3.1607128698.1707801742; _ga=GA1.1.381372473.1651249604; _ga_Q0EL30K2K5=GS1.1.1707801741.1.0.1707801770.0.0.0; _ga_54MVLT2EZN=GS1.1.1707843944.5.1.1707843969.0.0.0; __RequestVerificationToken_L05ldFNlcnZpY2Vz0=MrnqY4BqFXwyAR3uGWq5prQZPEwGWyzIJgIpuGFLyP8hqJ6eLKM9EWlC8NVA4MZqmyjtxmWT-9ZtzrO04NCTXcM_njimY7J0_WFWHlyWtzE1',
-    'Sec-Ch-Ua': '"Not A(Brand";v="99", "Google Chrome";v="131", "Chromium";v="131"',
-    'Sec-Ch-Ua-Mobile': '?0',
-    'Sec-Platform': '"Windows"',
-    'Sec-Fetch-Dest': 'document',
-    'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-Site': 'none',
-    'Sec-Fetch-User': '?1',
-    'Upgrade-Insecure-Requests': '1',
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-}
-
-
-proxies = {
-    "https": "3.70.191.255:8090",
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 }
 
 def setup_database():
     with sqlite3.connect(DATABASE) as conn:
         cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS contacts (
-                iid INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                phone TEXT NOT NULL,
-                email TEXT NOT NULL UNIQUE
-            )
-        ''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS contacts (
+            iid INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            phone TEXT NOT NULL,
+            email TEXT NOT NULL UNIQUE
+        )''')
 
 def save_to_database(name: str, phone: str, email: str):
-    """
-    儲存聯絡人資料到資料庫，避免重複資料。
-    """
+
     with sqlite3.connect(DATABASE) as conn:
         cursor = conn.cursor()
-        try:
-            cursor.execute('''
-                INSERT INTO contacts (name, phone, email)
-                VALUES (?, ?, ?)
-            ''', (name, phone, email))
-        except sqlite3.IntegrityError:
-            pass
+        cursor.execute('''SELECT COUNT(*) FROM contacts WHERE name = ? AND phone = ? AND email = ?''', (name, phone, email))
+        count = cursor.fetchone()[0]
+
+        if count == 0:
+            try:
+                cursor.execute('''INSERT INTO contacts (name, phone, email) VALUES (?, ?, ?)''', (name, phone, email))
+            except sqlite3.IntegrityError:
+                pass
 
 def scrape_contacts(url: str) -> list:
-    """
-    從指定的 URL 擷取聯絡人資料。
-    """
+
     try:
-        response = requests.get(url, headers=headers, proxies=proxies)
+        response = requests.get(url, headers=headers)
         response.raise_for_status()
+        html_content = response.text
 
-        emails = email_pattern.findall(response.text)
-        names = name_pattern.findall(response.text)
-        phones = phone_pattern.findall(response.text)
+        names = name_pattern.findall(html_content)
+        emails = email_pattern.findall(html_content)
+        phone_extensions = phone_extension_pattern.findall(html_content)
 
-        phones += [''] * (len(names) - len(phones))
 
-        contacts = [(name, phone, email) for name, phone, email in zip(names, phones, emails)]
+        unique_names = []
+        seen_names = set()
+        for name in names:
+            if name not in seen_names:
+                unique_names.append(name)
+                seen_names.add(name)
+
+        phone_data = phone_extensions
+
+        max_len = max(len(unique_names), len(phone_data), len(emails))
+        unique_names += [''] * (max_len - len(unique_names))
+        phone_data += [''] * (max_len - len(phone_data))
+        emails += [''] * (max_len - len(emails))
+
+        contacts = [(name, phone, email) for name, phone, email in zip(unique_names, phone_data, emails)]
+
         return contacts
+
     except requests.exceptions.RequestException as e:
         raise RuntimeError(f"無法抓取資料: {e}")
 
@@ -89,10 +81,13 @@ def pad_to_width(text: str, width: int) -> str:
 def display_contacts(contacts: list, text_widget: ScrolledText):
     text_widget.config(state='normal')
     text_widget.delete("1.0", "end")
+
+    text_widget.insert("end", f"{pad_to_width('姓名', 15)} {pad_to_width('分機', 15)} {'Email'}\n")
+    text_widget.insert("end", "-" * 60 + "\n")  # 分隔線
+
     for name, phone, email in contacts:
-        text_widget.insert("end", f"姓名: {pad_to_width(name, 15)}\n")
-        text_widget.insert("end", f"電話: {pad_to_width(phone, 15)}\n")
-        text_widget.insert("end", f"Email: {email}\n\n")
+        text_widget.insert("end", f"{pad_to_width(name, 15)} {pad_to_width(phone, 15)} {email}\n")
+
     text_widget.config(state='disabled')
 
 def on_scrape_button_click(url_var: StringVar, text_widget: ScrolledText):
@@ -118,7 +113,6 @@ def create_app():
     root.geometry("640x480")
     root.minsize(640, 480)
 
-    # URL 輸入框
     url_label = Label(root, text="URL:")
     url_label.grid(row=0, column=0, padx=5, pady=5, sticky="w")
 
@@ -129,11 +123,9 @@ def create_app():
     scrape_button = Button(root, text="抓取", command=lambda: on_scrape_button_click(url_var, text_widget))
     scrape_button.grid(row=0, column=4, padx=5, pady=5)
 
-    # 聯絡人顯示區域
     text_widget = ScrolledText(root, wrap="word", state='disabled')
     text_widget.grid(row=1, column=0, columnspan=5, padx=5, pady=5, sticky="nsew")
 
-    # 權重配置
     root.grid_rowconfigure(1, weight=1)
     root.grid_columnconfigure(1, weight=1)
 
