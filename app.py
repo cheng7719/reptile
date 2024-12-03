@@ -9,7 +9,7 @@ DATABASE = "contacts.db"
 
 email_pattern = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 name_pattern = re.compile(r"(?<![\w@.])[\u4e00-\u9fa5]{3,}(?![\w@.])")
-phone_extension_pattern = re.compile(r"電話：\d{2,4}-\d{6,8} 分機 (\d{3,5})")
+title_pattern = re.compile(r"職稱：([^<]+)")
 
 headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
@@ -21,50 +21,41 @@ def setup_database():
         cursor.execute('''CREATE TABLE IF NOT EXISTS contacts (
             iid INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
-            phone TEXT NOT NULL,
+            title TEXT NOT NULL,
             email TEXT NOT NULL UNIQUE
         )''')
 
-def save_to_database(name: str, phone: str, email: str):
-
+def save_to_database(name: str, title: str, email: str):
     with sqlite3.connect(DATABASE) as conn:
         cursor = conn.cursor()
-        cursor.execute('''SELECT COUNT(*) FROM contacts WHERE name = ? AND phone = ? AND email = ?''', (name, phone, email))
+        cursor.execute('''SELECT COUNT(*) FROM contacts WHERE name = ? AND title = ? AND email = ?''', (name, title, email))
         count = cursor.fetchone()[0]
 
         if count == 0:
             try:
-                cursor.execute('''INSERT INTO contacts (name, phone, email) VALUES (?, ?, ?)''', (name, phone, email))
+                cursor.execute('''INSERT INTO contacts (name, title, email) VALUES (?, ?, ?)''', (name, title, email))
             except sqlite3.IntegrityError:
                 pass
 
 def scrape_contacts(url: str) -> list:
-
     try:
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         html_content = response.text
 
-        names = name_pattern.findall(html_content)
-        emails = email_pattern.findall(html_content)
-        phone_extensions = phone_extension_pattern.findall(html_content)
+        teacher_pattern = r'<div class="member_name">.*?<a href=".*?">([^<]+)</a>.*?<span>(.*?)</span>.*?<div class="member_info_title">.*?職稱</div>.*?<div class="member_info_content">([^<]+)</div>.*?<div class="member_info_title">.*?學歷</div>.*?<div class="member_info_content">([^<]+)</div>.*?<div class="member_info_title">.*?信箱</div>.*?<div class="member_info_content">.*?mailto:(.*?)</a>.*?'
 
+        teachers = re.findall(teacher_pattern, html_content, re.DOTALL)
 
-        unique_names = []
-        seen_names = set()
-        for name in names:
-            if name not in seen_names:
-                unique_names.append(name)
-                seen_names.add(name)
+        contacts = []
+        for teacher in teachers:
+            name_chinese = teacher[0].strip()
+            title = teacher[2].strip()
+            email_raw = teacher[4].strip()
 
-        phone_data = phone_extensions
+            email = email_raw.split('"')[0].replace("//", "")
 
-        max_len = max(len(unique_names), len(phone_data), len(emails))
-        unique_names += [''] * (max_len - len(unique_names))
-        phone_data += [''] * (max_len - len(phone_data))
-        emails += [''] * (max_len - len(emails))
-
-        contacts = [(name, phone, email) for name, phone, email in zip(unique_names, phone_data, emails)]
+            contacts.append((name_chinese, title, email))
 
         return contacts
 
@@ -82,26 +73,26 @@ def display_contacts(contacts: list, text_widget: ScrolledText):
     text_widget.config(state='normal')
     text_widget.delete("1.0", "end")
 
-    text_widget.insert("end", f"{pad_to_width('姓名', 15)} {pad_to_width('分機', 15)} {'Email'}\n")
-    text_widget.insert("end", "-" * 60 + "\n")  # 分隔線
+    text_widget.insert("end", f"{pad_to_width('姓名', 15)} {pad_to_width('職稱', 30)} {'Email'}\n")
+    text_widget.insert("end", "-" * 80 + "\n")
 
-    for name, phone, email in contacts:
-        text_widget.insert("end", f"{pad_to_width(name, 15)} {pad_to_width(phone, 15)} {email}\n")
+    for name, title, email in contacts:
+        text_widget.insert("end", f"{pad_to_width(name, 15)} {pad_to_width(title, 30)} {email}\n")
 
     text_widget.config(state='disabled')
 
 def on_scrape_button_click(url_var: StringVar, text_widget: ScrolledText):
     url = url_var.get().strip()
     if not url:
-        messagebox.showwarning("警告", "無法取得網頁:404")
+        messagebox.showwarning("警告", "無法取得網頁: 404")
         return
     try:
         contacts = scrape_contacts(url)
         if not contacts:
             messagebox.showwarning("警告", "未找到聯絡人資訊！")
         else:
-            for name, phone, email in contacts:
-                save_to_database(name, phone, email)
+            for name, title, email in contacts:
+                save_to_database(name, title, email)
             display_contacts(contacts, text_widget)
             messagebox.showinfo("成功", "抓取完成！")
     except RuntimeError as e:
